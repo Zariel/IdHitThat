@@ -176,10 +176,18 @@ function f:COMBAT_LOG_EVENT_UNFILTERED(timeStamp, event, sourceGUID, sourceName,
 	end
 end
 
+local hasAgro = function(guid)
+	if(agro[guid] and #agro[guid] > 0) then
+		return true
+	else
+		return false
+	end
+end
+
 local timeout = function(guid)
 	local time = time()
 
-	if((time - (lastHit[guid] or 0) > 5) and (time - (lastUpdate[guid] or 0) > 5)) then
+	if((time - (lastHit[guid] or 0) > 5) and (time - (lastUpdate[guid] or 0) > 5) and hasAgro(guid)) then
 		return true
 	else
 		return false
