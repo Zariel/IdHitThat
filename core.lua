@@ -25,22 +25,17 @@ if(not lib) then
 	return
 end
 
+--[[
 local R = LibStub("ZeeRoster-1.0")
 
 if(not R) then
 	return error("WE REQUIRE ZEEROSTER")
 end
+]]
 
 local UnitExists = UnitExists
 local UnitInRaid = UnitInRaid
 local UnitGUID = UnitGUID
-local f = CreateFrame("Frame")
-
-f:SetScript("OnEvent", function(self, event, ...)
-	return self[event](self, ...)
-end)
-
-f:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 
 -- Combat time update, when they got hit, hit.
 local lastUpdate = {}
@@ -53,7 +48,7 @@ local combatants = {}
 local raid_combat = false
 
 --[[
-	ENDOFROSTERLOL
+	EVENTS
 ]]
 
 local damage_events = {
@@ -68,6 +63,14 @@ local healing_events = {
 	["SPELL_PERIODIC_HEAL"] = true,
 }
 
+local f = CreateFrame("Frame")
+
+f:SetScript("OnEvent", function(self, event, ...)
+	return self[event](self, ...)
+end)
+
+f:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 local friend_filter = bit.bor(COMBATLOG_OBJECT_AFFILIATION_MINE, COMBATLOG_OBJECT_AFFILIATION_PARTY, COMBATLOG_OBJECT_AFFILIATION_RAID)
 local hostile_filter = bit.bor(COMBATLOG_OBJECT_REACTION_NEUTRAL, COMBATLOG_OBJECT_REACTION_HOSTILE)
 
@@ -175,6 +178,26 @@ function f:COMBAT_LOG_EVENT_UNFILTERED(timeStamp, event, sourceGUID, sourceName,
 		return
 	end
 end
+
+function f:ZONE_CHANGED_NEW_AREA()
+	for k, v in pairs(agro) do
+		for i = 1, #agro[k] do
+			agro[k][i] = nil
+		end
+		agro[k] = nil
+	end
+
+	for k, v in pairs(combatants) do
+		for i = 1, #combatants[k] do
+			combatants[k][i] = nil
+		end
+		combatants[k] = nil
+	end
+end
+
+--[[
+	HELPERS
+]]
 
 local hasAgro = function(guid)
 	if(agro[guid] and #agro[guid] > 0) then
