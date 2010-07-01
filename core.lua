@@ -19,13 +19,16 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 --	A mob is aggrod.
 --	done damage in the past 5 seconds and the mob isnt dead.
 ]]
-
-local major, minor = "IdHitThat-1.0", 1
-
-local lib = LibStub:NewLibrary(major, minor)
+local lib = LibStub and LibStub:NewLibrary("IdHitThat-1.0", 1)
 
 if(not lib) then
 	return
+end
+
+local R = LibStub("ZeeRoster-1.0")
+
+if(not R) then
+	return error("WE REQUIRE ZEEROSTER")
 end
 
 local UnitExists = UnitExists
@@ -41,130 +44,185 @@ f:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 
 -- Combat time update, when they got hit, hit.
 local lastUpdate = {}
+local lastHit = {}
+-- mobs -> { players }
 local agro = {}
-local activeMobs = {}
-local isParty = bit.bor(0x1, 0xf)
+-- players -> { mobs }
+local combatants = {}
 
---[[
-	ROSTERLOL
-]]
-
-local playerGUID
-
--- owner guid -> pet guid
-local revPets = {}
--- pet guid -> Owner guid
-local pets = {}
--- unit -> guid
-local units = {}
--- guid -> unit
-local guids = {}
-
-local Clean = function(base, num)
-	local unit, guid
-	for i = 1, num do
-		unit = base .. i
-		guid = guids[unit]
-
-		if(guid) then
-			if(revPets[guid]) then
-				pets[revPets[guid]] = nil
-				revPets[guid] = nil
-			end
-
-			guids[guid] = nil
-			units[unit] = nil
-		end
-	end
-end
-
-local UpdateRoster = function(base, num)
-	local unit, guid
-
-	for i = 1, num do
-		unit = base .. i
-
-		if(UnitExists(unit)) then
-			guid = UnitGUID(unit)
-
-			if guid == playerGUID then
-				unit = "player"
-			end
-
-			units[unit] = guid
-			guids[guid] = unit
-
-			f:UNIT_PET(unit)
-		elseif(units[unit]) then
-			guids[units[unit]] = nil
-			units[unit] = nil
-
-			f:UNIT_PET(unit)
-		end
-	end
-end
-
-function f:RAID_ROSTER_UPDATE()
-	if(not UnitInRaid("player")) then
-		return Clean("raid", 40)
-	end
-
-	UpdateRoster("raid", 40)
-end
-
-function f:PARTY_MEMBERS_CHANGED(...)
-	if(not UnitExists("party1")) then
-		return Clean("party", 4)
-	end
-
-	UpdateRoster("party", 4)
-end
-
-function f:PLAYER_ENTERING_WORLD()
-	playerGUID = playerGUID or UnitGUID("player")
-
-	units.player = playerGUID
-	guids[playerGUID] = "player"
-
-	self:UNIT_PET("player")
-	self:RAID_ROSTER_UPDATE()
-	self:PARTY_MEMBERS_CHANGED()
-end
-
-function f:UNIT_PET(unit)
-	local guid = UnitGUID(unit)
-	local pet = unit .. "pet"
-
-	if(UnitExists(pet)) then
-		local pguid = UnitGUID(pet)
-		pets[pguid] = guid
-		revPets[guid] = pguid
-
-		units[pet] = pguid
-		guids[pguid] = pet
-	elseif(revPets[guid]) then
-		pets[revPets[guid]] = nil
-		revPets[guid] = nil
-
-		-- Does this still exist here?
-		if(units[pet]) then
-			guids[units[pet]] = nil
-			units[pet] = nil
-		end
-	end
-end
-
-f:RegisterEvent("RAID_ROSTER_UPDATE")
-f:RegisterEvent("PARTY_MEMBERS_CHANGED")
-f:RegisterEvent("PLAYER_ENTERING_WORLD")
-f:RegisterEvent("UNIT_PET")
-f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
-f.ZONE_CHANGED_NEW_AREA = f.PARTY_MEMBERS_CHANGED
+local raid_combat = false
 
 --[[
 	ENDOFROSTERLOL
 ]]
 
+local damage_events = {
+	["SWING_DAMAGE"] = true,
+	["SPELL_DAMAGE"] = true,
+	["SPELL_PERIODIC_DAMAGE"] = true,
+	["RANGE_DAMAGE"] = true,
+}
+
+local healing_events = {
+	["SPELL_HEAL"] = true,
+	["SPELL_PERIODIC_HEAL"] = true,
+}
+
+local friend_filter = bit.bor(COMBATLOG_OBJECT_AFFILIATION_MINE, COMBATLOG_OBJECT_AFFILIATION_PARTY, COMBATLOG_OBJECT_AFFILIATION_RAID)
+local hostile_filter = bit.bor(COMBATLOG_OBJECT_REACTION_NEUTRAL, COMBATLOG_OBJECT_REACTION_HOSTILE)
+
 function f:COMBAT_LOG_EVENT_UNFILTERED(timeStamp, event, sourceGUID, sourceName, sourceFlags, destGUID, destName, destFlags, ...)
+	if(bit.band(sourceFlags, friend_filter) > 0) then
+		-- Are we doing damage, or healing?
+		if(damage_events[event] and bit.band(destFlags, hostile_filter) > 0) then
+			raid_combat = true
+
+			if(not agro[destGUID]) then
+				agro[destGUID] = {}
+			end
+
+			if(not combatants[sourceGUID]) then
+				combatants[sourceGUID] = {}
+			end
+
+			table.insert(agro[destGUID], sourceGUID)
+			table.insert(combatants[sourceGUID], destGUID)
+
+			lastUpdate[sourceGUID] = timeStamp
+		elseif(healing_events[event] and bit.band(destFlags, COMBATLOG_OBJECT_REACTION_FRIENDLY) > 0) then
+			-- is the dest in combat?
+			if(combatants[destGUID] and #combatants[destGUID] > 0) then
+				raid_combat = true
+
+				-- For time being healer is locked in combat
+				-- by the mob the person he healed is in
+				-- combat with
+				if(combatants[destGUID] and #combatants[destGUID] > 0) then
+					combatants[sourceGUID] = combatants[sourceGUID] or {}
+					for k, v in pairs(combatants[destGUID]) do
+						table.insert(combatants[sourceGUID], v)
+					end
+				end
+
+				lastUpdate[sourceGUID] = timeStamp
+			end
+		elseif(event == "UNIT_DIED") then
+			-- friendly death
+			if(combatants[sourceGUID]) then
+				for k, v in pairs(combatants[sourceGUID]) do
+					if(agro[k] and #agro[k] > 0) then
+						for i = 1, #agro[k] do
+							if(agro[k][i] == sourceGUID) then
+								agro[k][i] = nil
+							end
+						end
+
+						if not(#agro[k] > 0) then
+							agro[k] = nil
+						end
+					end
+				end
+
+				combatants[sourceGUID] = nil
+			end
+
+			if not(#combatants > 0) then
+				raid_combat = false
+			end
+		else
+			return
+		end
+	elseif(bit.band(sourceFlags, hostile_filter) > 0) then
+		if(damage_events[event] and bit.band(destFlags, friend_filter) > 0) then
+			-- Someone got hit, oh fux!
+			if(not agro[sourceGUID]) then
+				agro[souceGUID] = {}
+			end
+
+			if(not combatants[destGUID]) then
+				combatants[destGUID] = {}
+			end
+
+			table.insert(agro[sourceGUID], destGUID)
+			table.insert(combatants[destGUID], sourceGUID)
+
+			lastHit[destGUID] = timestamp
+		elseif(event == "UNIT_DIED") then
+			-- Enemy death
+			if(agro[sourceGUID]) then
+				for k, v in pairs(agro[sourceGUID]) do
+					if(combatants[k] and #combatants[k] > 0) then
+						for i = 1, #combatants[k] do
+							if(combatants[k][i] == sourceGUID) then
+								combatants[k][i] = nil
+							end
+						end
+
+						if not(#combatants[k] > 0) then
+							combatants[k] = nil
+						end
+					end
+				end
+
+				agro[sourceGUID] = nil
+			end
+
+			if not(#agro > 0) then
+				raid_combat = false
+			end
+		end
+	else
+		return
+	end
 end
 
+local timeout = function(guid)
+	local time = time()
+
+	if((time - (lastHit[guid] or 0) > 5) and (time - (lastUpdate[guid] or 0) > 5)) then
+		return true
+	else
+		return false
+	end
+end
+
+--[[
+	PUBLIC API
+]]
+
+function lib:RaidInCombat()
+	local combat = false
+
+	if(#combatants > 0) then
+		for k, v in pairs(combatants) do
+			if(not timeout(guid)) then
+				combat = true
+				break
+			end
+		end
+	end
+
+
+	raid_combat = combat
+
+	return combat
+end
+
+function lib:InCombat(guid)
+	if(timeout(guid)) then
+		-- They are out of combat. Should really check if the rest of
+		-- the raid is in combat tho.
+		return false
+	end
+
+	if(self:RaidInCombat()) then
+		return true
+	end
+
+	-- Memory leak :E
+	if(#combatants[guid] > 0) then
+		return true
+	end
+
+	return false
+end

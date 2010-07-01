@@ -1,3 +1,5 @@
 ## Interface: 30300
+## OptionalDeps: ZeeRoster-1.0
 
+ZeeRoster-1.0.lua
 core.lua
